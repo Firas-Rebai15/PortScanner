@@ -230,7 +230,11 @@ async def tcp_scan(host: str, port: int, args) -> Result | None:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), args.timeout
         )
-    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+    except ConnectionRefusedError:
+        return Result(host, port, "tcp", "closed", service_name(port), 0.0)
+    except asyncio.TimeoutError:
+        return Result(host, port, "tcp", "filtered", service_name(port), args.timeout * 1000)
+    except OSError:
         return None
 
     rtt = (time.perf_counter() - started) * 1000
@@ -318,9 +322,11 @@ async def run(args) -> list[Result]:
             res = await scanner(item[0], item[1], args)
             if res:
                 results.append(res)
-                if not args.quiet:
+                if not args.quiet and (args.show_all or res.state == "open" or res.state == "open|filtered"):
                     print(fmt_row(res), flush=True)
-                if args.max_results and len(results) >= args.max_results:
+                if args.max_results and res.state in {"open", "open|filtered"} and sum(
+                    result.state in {"open", "open|filtered"} for result in results
+                ) >= args.max_results:
                     stop.set()
 
     await asyncio.gather(producer(), *[worker() for _ in range(args.concurrency)])
@@ -355,6 +361,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--json", metavar="FILE")
     p.add_argument("--csv", metavar="FILE")
     p.add_argument("-q", "--quiet", action="store_true", help="no live output, files only")
+    p.add_argument("--show-all", action="store_true", help="show open, closed, and filtered results")
     return p.parse_args(argv)
 
 
@@ -366,7 +373,10 @@ def main() -> int:
         print("\n[!] interrupted", file=sys.stderr)
         return 130
     write_outputs(results, args)
-    print(f"[*] done: {len(results)} open result(s)", file=sys.stderr)
+    counts = {state: sum(result.state == state for result in results)
+              for state in {result.state for result in results}}
+    summary = ", ".join(f"{state}={count}" for state, count in sorted(counts.items())) or "no results"
+    print(f"[*] done: {summary}", file=sys.stderr)
     return 0
 
 
